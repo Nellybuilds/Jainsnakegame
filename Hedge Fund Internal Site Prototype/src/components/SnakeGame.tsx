@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Play, Pause, RotateCcw, Trophy, Volume2, VolumeX, X } from 'lucide-react';
@@ -20,34 +20,39 @@ const SPEED_INCREMENT = 5;
 const MAX_SPEED = 50;
 
 export function SnakeGame({ onClose }: SnakeGameProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef(null as HTMLCanvasElement | null);
+  const containerRef = useRef(null as HTMLDivElement | null);
   const [gridSize, setGridSize] = useState({ width: 40, height: 30 });
   const [cellSize, setCellSize] = useState(20);
-  const [snake, setSnake] = useState<Position[]>([{ x: 10, y: 10 }]);
-  const [direction, setDirection] = useState<Direction>('RIGHT');
-  const [nextDirection, setNextDirection] = useState<Direction>('RIGHT');
-  const [food, setFood] = useState<Food>({ x: 15, y: 15, type: 'normal' });
-  const [score, setScore] = useState(0);
-  const [highScore, setHighScore] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
-  const [gameOver, setGameOver] = useState(false);
-  const [speed, setSpeed] = useState(INITIAL_SPEED);
-  const [soundEnabled, setSoundEnabled] = useState(false);
-  const gameLoopRef = useRef<number>();
+  const [snake, setSnake] = useState([{ x: 10, y: 10 }] as Position[]);
+  const [direction, setDirection] = useState('RIGHT' as Direction);
+  const [nextDirection, setNextDirection] = useState('RIGHT' as Direction);
+  const [food, setFood] = useState({ x: 15, y: 15, type: 'normal' } as Food);
+  const [score, setScore] = useState(0 as number);
+  const [highScore, setHighScore] = useState(0 as number);
+  const [isPlaying, setIsPlaying] = useState(false as boolean);
+  const [isPaused, setIsPaused] = useState(false as boolean);
+  const [gameOver, setGameOver] = useState(false as boolean);
+  const [speed, setSpeed] = useState(INITIAL_SPEED as number);
+  const [soundEnabled, setSoundEnabled] = useState(false as boolean);
+  const gameLoopRef = useRef(null as number | null);
+  // buffer for activation sequence 'hiss'
+  const typedBufferRef = useRef('');
+  const HISS_SEQUENCE = 'hiss';
 
   // Calculate grid size based on viewport
   useEffect(() => {
     const calculateGridSize = () => {
       const width = window.innerWidth;
       const height = window.innerHeight;
-      
       // Target cell size based on screen size
       const targetCellSize = Math.max(15, Math.min(25, Math.floor(Math.min(width, height) / 30)));
-      
+
+      // Leave a bottom gap so the bottom row is hidden and there is open space
+      const bottomGapPx = Math.round((window.innerHeight * 0.10)); // ~10vh
+
       const cols = Math.floor(width / targetCellSize);
-      const rows = Math.floor((height - 100) / targetCellSize); // Account for UI elements
+      const rows = Math.floor((height - bottomGapPx) / targetCellSize); // Account for UI elements and bottom gap
       
       setGridSize({ width: cols, height: rows });
       setCellSize(targetCellSize);
@@ -119,19 +124,15 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
 
   // Check collision
   const checkCollision = useCallback((head: Position, body: Position[]): boolean => {
-    // Wall collision
-    if (head.x < 0 || head.x >= gridSize.width || head.y < 0 || head.y >= gridSize.height) {
-      return true;
-    }
-    // Self collision
+    // Only self-collision kills the snake. Walls are wrapped instead.
     return body.some((segment) => segment.x === head.x && segment.y === head.y);
   }, [gridSize]);
 
   // Game loop
   const gameLoop = useCallback(() => {
-    setSnake((prevSnake) => {
+    setSnake((prevSnake: Position[]) => {
       const head = prevSnake[0];
-      let newHead: Position;
+      let newHead: Position = { x: head.x, y: head.y };
 
       switch (direction) {
         case 'UP':
@@ -148,7 +149,11 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
           break;
       }
 
-      // Check collision
+      // Wrap edges: move seamlessly from one edge to the opposite
+      newHead.x = (newHead.x + gridSize.width) % gridSize.width;
+      newHead.y = (newHead.y + gridSize.height) % gridSize.height;
+
+      // Check collision (self only)
       if (checkCollision(newHead, prevSnake)) {
         setGameOver(true);
         setIsPlaying(false);
@@ -156,17 +161,17 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
         return prevSnake;
       }
 
-      const newSnake = [newHead, ...prevSnake];
+  const newSnake = [newHead, ...prevSnake];
 
       // Check if food is eaten
       if (newHead.x === food.x && newHead.y === food.y) {
         const points = food.type === 'bonus' ? 10 : 1;
-        setScore((prev) => prev + points);
+  setScore((prev: number) => prev + points);
         setFood(generateFood(newSnake));
         playSound(food.type === 'bonus' ? 800 : 600, 0.1);
         
         // Increase speed
-        setSpeed((prev) => Math.max(MAX_SPEED, prev - SPEED_INCREMENT));
+  setSpeed((prev: number) => Math.max(MAX_SPEED, prev - SPEED_INCREMENT));
       } else {
         newSnake.pop();
       }
@@ -203,22 +208,50 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
         return;
       }
 
-      if (gameOver) return;
-
-      if (e.code === 'Space') {
-        e.preventDefault();
-        if (isPlaying) {
-          setIsPaused((prev) => !prev);
-        } else {
-          startGame();
+      // If game over, allow typed activation sequence to restart
+      if (gameOver) {
+        const k = e.key.toLowerCase();
+        if (/^[a-z]$/.test(k)) {
+          typedBufferRef.current += k;
+          if (typedBufferRef.current.length > HISS_SEQUENCE.length) {
+            typedBufferRef.current = typedBufferRef.current.slice(-HISS_SEQUENCE.length);
+          }
+          if (typedBufferRef.current === HISS_SEQUENCE) {
+            startGame();
+            typedBufferRef.current = '';
+          }
         }
         return;
       }
 
-      if (!isPlaying || isPaused) return;
+      // Space should only pause/resume if the game is playing; do not start via space
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (isPlaying) {
+          setIsPaused((prev: boolean) => !prev);
+        }
+        return;
+      }
+
+      // If not playing, listen for the activation word 'hiss'
+      if (!isPlaying) {
+        const k = e.key.toLowerCase();
+        if (/^[a-z]$/.test(k)) {
+          typedBufferRef.current += k;
+          if (typedBufferRef.current.length > HISS_SEQUENCE.length) {
+            typedBufferRef.current = typedBufferRef.current.slice(-HISS_SEQUENCE.length);
+          }
+          if (typedBufferRef.current === HISS_SEQUENCE) {
+            startGame();
+            typedBufferRef.current = '';
+          }
+        }
+        return;
+      }
+
+  if (isPaused) return;
 
       const key = e.key.toLowerCase();
-      
       switch (key) {
         case 'arrowup':
         case 'w':
@@ -258,24 +291,10 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
     // Clear canvas with transparent background
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Draw grid (subtle)
-    ctx.strokeStyle = 'rgba(167, 139, 250, 0.1)';
-    ctx.lineWidth = 1;
-    for (let i = 0; i <= gridSize.width; i++) {
-      ctx.beginPath();
-      ctx.moveTo(i * cellSize, 0);
-      ctx.lineTo(i * cellSize, gridSize.height * cellSize);
-      ctx.stroke();
-    }
-    for (let i = 0; i <= gridSize.height; i++) {
-      ctx.beginPath();
-      ctx.moveTo(0, i * cellSize);
-      ctx.lineTo(gridSize.width * cellSize, i * cellSize);
-      ctx.stroke();
-    }
+    // Do NOT draw grid lines or visible walls — keep the play area clean
 
     // Draw snake
-    snake.forEach((segment, index) => {
+  snake.forEach((segment: Position, index: number) => {
       if (index === 0) {
         // Head - brighter
         const gradient = ctx.createRadialGradient(
@@ -364,7 +383,7 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
 
   const togglePause = () => {
     if (isPlaying && !gameOver) {
-      setIsPaused((prev) => !prev);
+  setIsPaused((prev: boolean) => !prev);
     }
   };
 
@@ -387,9 +406,9 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
       {/* Glass container */}
       <div className="relative z-10 flex flex-col items-center gap-6 w-full h-full p-6">
         {/* Header - Frosted glass effect */}
-        <div className="flex items-center justify-between w-full max-w-7xl px-8 py-4 rounded-2xl backdrop-blur-xl bg-white/5 border border-white/10 shadow-2xl">
+  <div className="flex items-center justify-between w-full max-w-7xl px-8 py-4 rounded-2xl backdrop-blur-xl bg-white/5 shadow-2xl">
           <div className="flex items-center gap-6">
-            <Badge className="bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-700 hover:to-purple-600 px-4 py-2 shadow-lg shadow-purple-500/50">
+            <Badge className="bg-gradient-to-r from-purple-600 to-purple-500 px-4 py-2 shadow-lg shadow-purple-500/50">
               Score: {score}
             </Badge>
             <Badge variant="outline" className="border-purple-400/50 text-purple-300 px-4 py-2 backdrop-blur-sm bg-purple-500/10">
@@ -403,7 +422,7 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
               variant="ghost"
               size="sm"
               onClick={() => setSoundEnabled(!soundEnabled)}
-              className="text-purple-300 hover:text-purple-200 hover:bg-white/10"
+              className="text-purple-300"
             >
               {soundEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
             </Button>
@@ -411,7 +430,7 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
               variant="ghost"
               size="sm"
               onClick={onClose}
-              className="text-purple-300 hover:text-purple-200 hover:bg-white/10"
+              className="text-purple-300"
             >
               <X className="w-5 h-5" />
             </Button>
@@ -420,7 +439,7 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
 
         {/* Game Canvas - Liquid glass background */}
         <div className="relative flex-1 flex items-center justify-center w-full">
-          <div className="relative rounded-3xl backdrop-blur-2xl bg-gradient-to-br from-white/10 via-white/5 to-transparent border border-white/20 shadow-2xl p-8">
+          <div className="relative rounded-3xl backdrop-blur-2xl bg-gradient-to-br from-white/10 via-white/5 to-transparent shadow-2xl p-8">
             <canvas
               ref={canvasRef}
               width={gridSize.width * cellSize}
@@ -428,6 +447,7 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
               className="rounded-xl shadow-2xl"
               style={{
                 background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8) 0%, rgba(30, 27, 75, 0.6) 100%)',
+                border: 'none',
               }}
             />
             
@@ -455,19 +475,20 @@ export function SnakeGame({ onClose }: SnakeGameProps) {
               </div>
             )}
             
-            {/* Start Screen */}
+            {/* Start Screen - passive; instruct to type 'hiss' to start. Button kept optional. */}
             {!isPlaying && !gameOver && (
               <div className="absolute inset-0 backdrop-blur-xl bg-black/60 flex flex-col items-center justify-center rounded-xl">
-                <div className="backdrop-blur-2xl bg-white/10 border border-white/20 rounded-2xl p-10 shadow-2xl max-w-md">
+                <div className="backdrop-blur-2xl bg-white/10 rounded-2xl p-10 shadow-2xl max-w-md">
                   <h2 className="text-purple-300 mb-6 text-center">🐍 Retro Snake Game</h2>
                   <div className="text-purple-200 text-sm mb-8 text-center space-y-2">
+                    <p>Type <strong className="text-white">hiss</strong> to activate the game</p>
                     <p>Use <kbd className="px-2 py-1 bg-white/20 rounded">Arrow Keys</kbd> or <kbd className="px-2 py-1 bg-white/20 rounded">WASD</kbd> to move</p>
                     <p>Press <kbd className="px-2 py-1 bg-white/20 rounded">SPACE</kbd> to pause</p>
                     <p>Press <kbd className="px-2 py-1 bg-white/20 rounded">ESC</kbd> to exit</p>
                   </div>
-                  <Button onClick={startGame} className="w-full bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-700 hover:to-purple-600 shadow-lg shadow-purple-500/50">
+                  <Button onClick={startGame} className="w-full bg-gradient-to-r from-purple-600 to-purple-500 shadow-lg shadow-purple-500/50">
                     <Play className="w-5 h-5 mr-2" />
-                    Start Game
+                    Start (or type 'hiss')
                   </Button>
                 </div>
               </div>

@@ -1,0 +1,24 @@
+/* Jain Snake landing styles */
+.jain-snake-canvas {
+  border: none !important; /* remove any visible border */
+  box-shadow: none !important; /* remove shadow */
+  cursor: default;
+  touch-action: none; /* avoid mobile browser gestures interfering */
+}
+
+/* Ensure images and nearby elements don't show hover text when near the game */
+img, a img {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+/* Remove default focus outlines if any for canvas */
+.jain-snake-canvas:focus { outline: none; }
+
+/* Optionally add a subtle rounded background behind the canvas */
+#jain-snake-canvas {
+  border-radius: 12px;
+}
+
+/* Hide bottom row of the page using a small spacer when canvas is centered */
+body { --jain-snake-bottom-gap: 10vh; }
