@@ -158,9 +158,13 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
     const r = Math.random();
     let type: FoodType;
     if (forcedType) type = forcedType;
-    else if (r < 0.6) type = 'apple';
-    else if (r < 0.85) type = 'money';
-    else if (r < 0.95) type = 'rising';
+    // Adjusted spawn weights: increase the chance of stock items (rising/dropping)
+    // so players encounter them more often. Tuned to keep randomness while
+    // boosting stocks relative to neutral foods.
+    // Distribution (example): apple 45% | money 20% | rising 25% | dropping 10%
+    else if (r < 0.45) type = 'apple';
+    else if (r < 0.65) type = 'money';
+    else if (r < 0.90) type = 'rising';
     else type = 'dropping';
 
     let label = '🍎';
@@ -179,7 +183,9 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
       const occupied = prev.map(f => ({ x: f.x, y: f.y }));
       // bias: prefer neutral spawn if too few neutrals
       const neutrals = prev.filter(p => p.type === 'apple' || p.type === 'money');
-      let preferNeutral = neutrals.length === 0 || Math.random() < 0.7;
+      // Reduce neutral preference so stocks have a better chance to appear.
+      // Previously this heavily favored neutral items (70%); lower to 50%.
+      let preferNeutral = neutrals.length === 0 || Math.random() < 0.5;
       if (forcedType) preferNeutral = (forcedType === 'apple' || forcedType === 'money');
       const f = generateFood(occupied as Position[], preferNeutral ? 'apple' : undefined);
       if (!f) return prev;
@@ -605,10 +611,12 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
     const id = window.setInterval(() => {
       // occasionally attempt to spawn (keeps play lively)
   if ((foodsRef.current || []).length < 5) {
+        // Slightly bias the interval-based spawns toward stocks.
+        // r < 0.55: neutral spawn | 0.55-0.75: money | 0.75-0.92: rising | else: dropping
         const r = Math.random();
-        if (r < 0.7) spawnFood();
-        else if (r < 0.85) spawnFood('money');
-        else if (r < 0.95) spawnFood('rising');
+        if (r < 0.55) spawnFood();
+        else if (r < 0.75) spawnFood('money');
+        else if (r < 0.92) spawnFood('rising');
         else spawnFood('dropping');
       }
     }, 1400 + Math.floor(Math.random() * 800));
