@@ -285,12 +285,21 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
         // Trail
         setTrail((t: Position[]) => [head, ...t].slice(0, TRAIL_LENGTH));
 
-        // Food detection: use circle-based hit test between head center and food center
-        let ateAny = false;
-        setFoods((prevFoods) => {
+  // Food detection: use circle-based hit test between head center and food center.
+  // We treat the snake head and the food as circles (pixels) so the hitbox matches
+  // the visual sizes (SNAKE_DRAW_INSET, HEAD_SCALE, FOOD_RADIUS_FACTOR).
+  // When a hit is detected we:
+  //  1. mark the food with `consumedAt` (keeps it available for a short consume animation),
+  //  2. schedule removal after a short delay (so the eat animation plays),
+  //  3. award points and growth immediately, and
+  //  4. schedule a replacement spawn.
+  // This keeps animations (pulsing/movement) intact until the food is visually removed.
+  let ateAny = false;
+  setFoods((prevFoods) => {
           const headCx = newHead.x * CELL_SIZE + CELL_SIZE / 2;
           const headCy = newHead.y * CELL_SIZE + CELL_SIZE / 2;
           // head radius in pixels (approximate based on visual head scale and inset)
+          // We subtract SNAKE_DRAW_INSET so the radius corresponds to the painted segment area.
           const headRadius = Math.max(2, (CELL_SIZE * HEAD_SCALE) / 2 - SNAKE_DRAW_INSET);
 
           for (const f of prevFoods) {
@@ -301,6 +310,7 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
             const dx = headCx - foodCx; const dy = headCy - foodCy;
             const dist2 = dx * dx + dy * dy;
             const hitRadius = headRadius + foodRadius;
+            // If the squared distance between centers is less than squared hit radius => collision
             if (dist2 <= hitRadius * hitRadius) {
               let pts = 0;
               switch (f.type) {
@@ -320,8 +330,13 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
               playSound(f.type === 'bonus' ? 900 : 700, 0.1);
               setIntervalMs((i: number) => clamp(i - 8, MIN_INTERVAL, DEFAULT_INTERVAL));
 
+              // Mark the food as consumed (store timestamp) so the draw loop can play a
+              // short shrink/fade animation. We still keep the item in `foods` until
+              // the removal timeout completes so movement/pulse continue until it's gone.
               const now = Date.now();
               const marked = prevFoods.map(p => p.id === f.id ? { ...p, consumedAt: now } : p);
+              // Remove the consumed food after a short delay (260ms) to allow the
+              // consumption animation to play and to avoid instantaneous disappearance.
               setTimeout(() => { setFoods((later) => later.filter(p => p.id !== f.id)); }, 260);
               setTimeout(() => spawnFood(), 150);
               foodSpawnCounterRef.current = (foodSpawnCounterRef.current || 0) + 1;
@@ -548,16 +563,28 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
       ctx.save();
       // pulse for high-value
       const pulse = ((Math.sin(animTime / 250 + fi) + 1) / 2) * 0.08 + 0.96;
+  // Base radius for the food (before spawn pulse and/or consumed animation)
   const baseRadius = Math.max(FOOD_RADIUS_MIN, CELL_SIZE * FOOD_RADIUS_FACTOR);
-  const radius = baseRadius * spawnScale * pulse;
-  ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  // If the food was just consumed, animate a quick shrink+fade. Keep it visually
+  // present for a short moment (consumedFadeMs) to make the eat action more clear.
+  const consumedFadeMs = 220;
+  let radius = baseRadius * spawnScale * pulse;
+  let alpha = 0.98;
+  if (foodItem.consumedAt) {
+    const since = Math.max(0, animTime - foodItem.consumedAt);
+    const t = clamp(since / consumedFadeMs, 0, 1);
+    // shrink and fade out over the consumedFadeMs window
+    radius = radius * (1 - t);
+    alpha = 0.98 * (1 - t);
+  }
+  ctx.beginPath(); ctx.arc(cx, cy, Math.max(0.5, radius), 0, Math.PI * 2);
       if (foodItem.type === 'dropping') ctx.fillStyle = '#7f1d1d';
       else if (foodItem.type === 'rising') ctx.fillStyle = '#064e3b';
       else ctx.fillStyle = '#111827';
-      ctx.globalAlpha = 0.98;
+      ctx.globalAlpha = alpha;
       ctx.fill();
       // label
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       if (foodItem.type === 'rising' || foodItem.type === 'dropping') { ctx.font = `${Math.round(10 * (0.9 + spawnScale))}px monospace`; ctx.fillStyle = '#ffffff'; ctx.fillText(foodItem.label, cx, cy); }
       else { ctx.font = `${Math.round(12 * (0.9 + spawnScale))}px serif`; ctx.fillStyle = '#ffffff'; ctx.fillText(foodItem.label, cx, cy); }
       ctx.restore();
