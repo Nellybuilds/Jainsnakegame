@@ -27,13 +27,16 @@ const MONEY_BAGS = ['💰','💵','💸','💎','🏆'];
 const clamp = (v:number,a:number,b:number) => Math.max(a, Math.min(b, v));
 
 // Visual tuning constants (easy to tweak)
-const SNAKE_DRAW_INSET = 0.5; // smaller inset -> larger visible snake in cell
-const SNAKE_OUTLINE_COLOR = '#ffffff'; // subtle outline
+// Increase snake visibility: reduce inset so painted segment fills more of the cell.
+const SNAKE_DRAW_INSET = 0.25; // smaller inset -> larger visible snake in cell
+const SNAKE_OUTLINE_COLOR = '#ffffff'; // subtle outline for contrast
 const SNAKE_BRIGHT_GRADIENT_START = '#f8fbff';
 const SNAKE_BRIGHT_GRADIENT_END = '#c7f0ff';
-const HEAD_SCALE = 0.95; // used for collision head radius
-const FOOD_RADIUS_FACTOR = 0.32; // multiply by CELL_SIZE
-const FOOD_RADIUS_MIN = 4;
+// HEAD_SCALE controls the radius used for hit detection (visual-to-hit mapping)
+const HEAD_SCALE = 1.0; // use full-cell visual size for head collision
+// Make foods (stocks) smaller than the snake head by lowering the factor
+const FOOD_RADIUS_FACTOR = 0.26; // multiply by CELL_SIZE (smaller than before)
+const FOOD_RADIUS_MIN = 3;
 
 export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
   // Refs and canvas
@@ -196,7 +199,9 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
   // RAF loop: drives animations and schedules movement for high-value foods
   useEffect(() => {
     let mounted = true;
-    const moveInterval = 3000; // ms base for high-value repositions
+  // Base interval for high-value stocks to re-position. We slow this down so
+  // 'rising' and 'dropping' stocks move more slowly across the board.
+  const moveInterval = 4500; // ms base for high-value repositions (slower)
     const loop = () => {
       if (!mounted) return;
       const now = Date.now();
@@ -208,9 +213,14 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
         const out = prev.map((f) => {
           if ((f.type === 'rising' || f.type === 'dropping')) {
             if (!f.target && now - f.lastMoveAt > moveInterval + Math.random() * 2000) {
+              // Choose a safe target and set a move duration based on type.
+              // Stocks (rising/dropping) should move slowly; high-value stocks get
+              // slightly longer, smoother moves so players can react.
               const target = findSafePosition(prev.map(p => ({ x: p.x, y: p.y })), 2) || { x: f.x, y: f.y };
               changed = true;
-              return { ...f, target, moveStart: now, moveDuration: 1000 + Math.floor(Math.random() * 1200) } as Food;
+              const baseDur = f.type === 'rising' || f.type === 'dropping' ? 1400 : 900;
+              const extra = f.type === 'rising' ? 800 : 500; // give rising a slightly longer glide
+              return { ...f, target, moveStart: now, moveDuration: baseDur + Math.floor(Math.random() * extra) } as Food;
             }
             // if it has a target and moveStart completed, finalize
             if (f.target && f.moveStart && f.moveDuration && now - f.moveStart >= f.moveDuration) {
@@ -318,15 +328,19 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
             const hitRadius = headRadius + foodRadius;
             // If the squared distance between centers is less than squared hit radius => collision
             if (dist2 <= hitRadius * hitRadius) {
+              // Scoring: define points per food type. Rising stocks are high-value.
               let pts = 0;
               switch (f.type) {
-                case 'apple': pts = 1; break;
-                case 'money': pts = 2; break;
-                case 'rising': pts = 10; break;
-                case 'dropping': pts = -15; break;
-                case 'bonus': pts = 20; break;
+                case 'apple': pts = 1; break; // simple +1
+                case 'money': pts = 2; break; // small bonus
+                case 'rising': pts = 10; break; // high-value stock
+                case 'dropping': pts = -15; break; // negative stock
+                case 'bonus': pts = 20; break; // rare large bonus
               }
-              // Growth logic
+              // Growth logic: how many segments the snake should grow when eating
+              // - apple/money: +1
+              // - rising (high-value): +2
+              // - dropping (negative): 0 (no growth)
               let growth = 0;
               if (f.type === 'apple' || f.type === 'money') growth = 1;
               if (f.type === 'rising') growth = 2;
@@ -574,7 +588,10 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
   // If the food was just consumed, animate a quick shrink+fade. Keep it visually
   // present for a short moment (consumedFadeMs) to make the eat action more clear.
   const consumedFadeMs = 220;
-  let radius = baseRadius * spawnScale * pulse;
+  // Stocks should have a stronger pulse to attract attention.
+  const isStock = foodItem.type === 'rising' || foodItem.type === 'dropping';
+  const stockPulseAmpl = isStock ? 1.18 : 1.0;
+  let radius = baseRadius * spawnScale * pulse * stockPulseAmpl;
   let alpha = 0.98;
   if (foodItem.consumedAt) {
     const since = Math.max(0, animTime - foodItem.consumedAt);
@@ -584,9 +601,10 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
     alpha = 0.98 * (1 - t);
   }
   ctx.beginPath(); ctx.arc(cx, cy, Math.max(0.5, radius), 0, Math.PI * 2);
-      if (foodItem.type === 'dropping') ctx.fillStyle = '#7f1d1d';
-      else if (foodItem.type === 'rising') ctx.fillStyle = '#064e3b';
-      else ctx.fillStyle = '#111827';
+  // Use Jain Global brand-like bright colors for stocks
+  if (foodItem.type === 'dropping') ctx.fillStyle = '#F44336'; // bright red for falling
+  else if (foodItem.type === 'rising') ctx.fillStyle = '#4CAF50'; // bright green for rising
+  else ctx.fillStyle = '#111827';
       ctx.globalAlpha = alpha;
       ctx.fill();
       // label
@@ -623,12 +641,21 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
     return () => clearInterval(id);
   }, [isPlaying, foods, spawnFood]);
 
-  // Disable hover transitions on obstacle elements (non-destructive CSS class)
+    // Disable/hide hover transitions and reduce visual clutter for obstacle elements
+    // inside the play area to keep the game area immersive. We add a lightweight
+    // class to candidate elements and apply styles that remove hover transforms,
+    // reduce opacity, and disable pointer events so the UI doesn't get in the way
+    // while the game is playing. This is intentionally destructive while the
+    // overlay is active; tweak to suit your needs.
   useEffect(() => {
     // Inject CSS once
     const styleId = 'dom-snake-disable-hover-style';
     if (!document.getElementById(styleId)) {
-      const style = document.createElement('style'); style.id = styleId; style.innerHTML = `.${DISABLE_HOVER_CLASS}:hover{ transition:none !important; transform:none !important; box-shadow:none !important; filter:none !important; }`;
+      const style = document.createElement('style'); style.id = styleId;
+      style.innerHTML = `.${DISABLE_HOVER_CLASS}:hover{ transition:none !important; transform:none !important; box-shadow:none !important; filter:none !important; }
+      /* reduce visual clutter in the play area and disable interaction */
+      .${DISABLE_HOVER_CLASS} { opacity: 0.6 !important; pointer-events: none !important; user-select: none !important; }
+      `;
       document.head.appendChild(style);
     }
     obstacles.forEach((o: Obstacle) => { try { o.element.classList.add(DISABLE_HOVER_CLASS); } catch {} });
