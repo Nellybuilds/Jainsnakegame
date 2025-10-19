@@ -8,7 +8,8 @@ type Direction = 'UP' | 'DOWN' | 'LEFT' | 'RIGHT';
 type Position = { x: number; y: number };
 type FoodType = 'apple' | 'money' | 'rising' | 'dropping' | 'bonus';
 
-interface Food extends Position { type: FoodType; label: string }
+// Food item with animation + movement metadata
+interface Food extends Position { id: string; type: FoodType; label: string; spawnAt: number; lastMoveAt: number; target?: Position; moveStart?: number; moveDuration?: number; consumedAt?: number }
 interface Obstacle { x: number; y: number; width: number; height: number; element: HTMLElement }
 interface DOMSnakeGameProps { onClose?: () => void }
 
@@ -25,6 +26,15 @@ const MONEY_BAGS = ['💰','💵','💸','💎','🏆'];
 
 const clamp = (v:number,a:number,b:number) => Math.max(a, Math.min(b, v));
 
+// Visual tuning constants (easy to tweak)
+const SNAKE_DRAW_INSET = 0.5; // smaller inset -> larger visible snake in cell
+const SNAKE_OUTLINE_COLOR = '#ffffff'; // subtle outline
+const SNAKE_BRIGHT_GRADIENT_START = '#f8fbff';
+const SNAKE_BRIGHT_GRADIENT_END = '#c7f0ff';
+const HEAD_SCALE = 0.95; // used for collision head radius
+const FOOD_RADIUS_FACTOR = 0.32; // multiply by CELL_SIZE
+const FOOD_RADIUS_MIN = 4;
+
 export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
   // Refs and canvas
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -35,10 +45,16 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
   const [snake, setSnake] = useState<Position[]>([]);
   const nextDirection = useRef<Direction>('RIGHT');
   const [direction, setDirection] = useState<Direction>('RIGHT');
-  const [food, setFood] = useState<Food | null>(null);
+  // multiple foods on screen (max 5)
+  const [foods, setFoods] = useState<Food[]>([]);
+  const foodsRef = useRef<Food[]>([]);
+  useEffect(() => { foodsRef.current = foods; }, [foods]);
+  const [animTime, setAnimTime] = useState<number>(0);
   const [obstacles, setObstacles] = useState<Obstacle[]>([]);
   const [score, setScore] = useState<number>(0);
   const [highScore, setHighScore] = useState<number>(0);
+  const [level, setLevel] = useState<number>(1);
+  const totalEatenRef = useRef<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [gameOver, setGameOver] = useState<boolean>(false);
@@ -53,6 +69,16 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
   // Hedgehog
   const [hedgehog, setHedgehog] = useState<{ pos: Position; active: boolean } | null>(null);
   const hedgehogTimerRef = useRef<number | null>(null);
+  // food spawn counters for hedgehog events
+  const foodSpawnCounterRef = useRef<number>(0);
+  // schedule hedgehog after 5-6 spawns to reduce aggressiveness
+  const nextHedgehogAtRef = useRef<number>(Math.floor(Math.random() * 2) + 5); // 5-6
+  const rafRef = useRef<number | null>(null);
+  // growth queue: number of extra ticks to keep tail (snake grows by avoiding pops)
+  const growRef = useRef<number>(0);
+  // hedgehog chase timeout (ms)
+  const HEDGEHOG_CHASE_TIMEOUT = 4000; // shorter chase
+  const HEDGEHOG_MOVE_INTERVAL = 400; // slower movement
 
   // CSS class to reduce hover effects on obstacles
   const DISABLE_HOVER_CLASS = 'dom-snake-disable-hover';
@@ -110,11 +136,13 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
     return obstacles.some((o: Obstacle) => p.x >= o.x && p.x < o.x + o.width && p.y >= o.y && p.y < o.y + o.height);
   }, [obstacles]);
 
-  const findSafePosition = useCallback((avoid: Position[] = []): Position | null => {
-    for (let i = 0; i < 300; i++) {
-      const x = Math.floor(Math.random() * grid.width);
-      // ensure food/spawn only in the play area (0..grid.height-1)
-      const y = Math.floor(Math.random() * grid.height);
+  const findSafePosition = useCallback((avoid: Position[] = [], margin = 2): Position | null => {
+    // avoid edges by margin cells
+    const minX = margin; const maxX = Math.max(minX, grid.width - 1 - margin);
+    const minY = margin; const maxY = Math.max(minY, grid.height - 1 - margin);
+    for (let i = 0; i < 500; i++) {
+      const x = Math.floor(Math.random() * (maxX - minX + 1)) + minX;
+      const y = Math.floor(Math.random() * (maxY - minY + 1)) + minY;
       if (avoid.some((a: Position) => a.x === x && a.y === y)) continue;
       if (isInsideObstacle({ x, y })) continue;
       return { x, y };
@@ -123,15 +151,76 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
   }, [grid.width, grid.height, isInsideObstacle]);
 
   // Food generation with weighted types
-  const generateFood = useCallback((currentSnake: Position[]): Food | null => {
-    const p = findSafePosition(currentSnake);
+  // Generate a single Food item (with id + timestamps)
+  const generateFood = useCallback((currentSnake: Position[], forcedType?: FoodType): Food | null => {
+    const p = findSafePosition(currentSnake, 2);
     if (!p) return null;
     const r = Math.random();
-    if (r < 0.6) return { ...p, type: 'apple', label: '🍎' };
-    if (r < 0.8) return { ...p, type: 'money', label: MONEY_BAGS[Math.floor(Math.random() * MONEY_BAGS.length)] };
-    if (r < 0.92) return { ...p, type: 'rising', label: STOCK_TICKERS[Math.floor(Math.random() * STOCK_TICKERS.length)] };
-    if (r < 0.98) return { ...p, type: 'dropping', label: STOCK_TICKERS[Math.floor(Math.random() * STOCK_TICKERS.length)] };
-    return { ...p, type: 'bonus', label: '💎' };
+    let type: FoodType;
+    if (forcedType) type = forcedType;
+    else if (r < 0.6) type = 'apple';
+    else if (r < 0.85) type = 'money';
+    else if (r < 0.95) type = 'rising';
+    else type = 'dropping';
+
+    let label = '🍎';
+    if (type === 'money') label = MONEY_BAGS[Math.floor(Math.random() * MONEY_BAGS.length)];
+    if (type === 'rising' || type === 'dropping') label = STOCK_TICKERS[Math.floor(Math.random() * STOCK_TICKERS.length)];
+
+    const now = Date.now();
+    return { id: `${now}-${Math.floor(Math.random() * 9999)}`, x: p.x, y: p.y, type, label, spawnAt: now, lastMoveAt: now };
+  }, [findSafePosition]);
+
+  // Spawn a food into foods[] with caps and rules (cap lower for cleaner gameplay)
+  const spawnFood = useCallback((forcedType?: FoodType) => {
+    setFoods((prev) => {
+      const cap = 3; // max visible foods
+      if (prev.length >= cap) return prev;
+      const occupied = prev.map(f => ({ x: f.x, y: f.y }));
+      // bias: prefer neutral spawn if too few neutrals
+      const neutrals = prev.filter(p => p.type === 'apple' || p.type === 'money');
+      let preferNeutral = neutrals.length === 0 || Math.random() < 0.7;
+      if (forcedType) preferNeutral = (forcedType === 'apple' || forcedType === 'money');
+      const f = generateFood(occupied as Position[], preferNeutral ? 'apple' : undefined);
+      if (!f) return prev;
+      return [...prev, f];
+    });
+  }, [generateFood]);
+
+  // RAF loop: drives animations and schedules movement for high-value foods
+  useEffect(() => {
+    let mounted = true;
+    const moveInterval = 3000; // ms base for high-value repositions
+    const loop = () => {
+      if (!mounted) return;
+      const now = Date.now();
+      setAnimTime(now);
+
+      // Schedule occasional reposition for rising/dropping foods
+      setFoods((prev) => {
+        let changed = false;
+        const out = prev.map((f) => {
+          if ((f.type === 'rising' || f.type === 'dropping')) {
+            if (!f.target && now - f.lastMoveAt > moveInterval + Math.random() * 2000) {
+              const target = findSafePosition(prev.map(p => ({ x: p.x, y: p.y })), 2) || { x: f.x, y: f.y };
+              changed = true;
+              return { ...f, target, moveStart: now, moveDuration: 1000 + Math.floor(Math.random() * 1200) } as Food;
+            }
+            // if it has a target and moveStart completed, finalize
+            if (f.target && f.moveStart && f.moveDuration && now - f.moveStart >= f.moveDuration) {
+              changed = true;
+              return { ...f, x: f.target.x, y: f.target.y, target: undefined, moveStart: undefined, moveDuration: undefined, lastMoveAt: now } as Food;
+            }
+          }
+          return f;
+        });
+        return changed ? out : prev;
+      });
+
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    rafRef.current = requestAnimationFrame(loop);
+    return () => { mounted = false; if (rafRef.current) cancelAnimationFrame(rafRef.current); rafRef.current = null; };
   }, [findSafePosition]);
 
   // Minimal sound helper
@@ -147,15 +236,20 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
 
   // --- Hedgehog ---
   const spawnHedgehog = useCallback(() => {
+    // Spawn hedgehog at a safe location; attach a timestamp for limited chase
     const p = findSafePosition(snake) || { x: 0, y: 0 };
     setHedgehog({ pos: p, active: true });
+    // stop hedgehog after timeout
+    window.setTimeout(() => { setHedgehog((h) => h ? { ...h, active: false } : h); }, HEDGEHOG_CHASE_TIMEOUT);
   }, [findSafePosition, snake]);
 
+  // Hedgehog background spawner (keeps minimal frequency but also respects food-based scheduling)
   useEffect(() => {
     if (!isPlaying) return;
     hedgehogTimerRef.current = window.setInterval(() => {
-      if (Math.random() < 0.12 && !hedgehog) spawnHedgehog();
-    }, 4500);
+      // Rare background spawn (safety net)
+      if (Math.random() < 0.04 && !hedgehog) spawnHedgehog();
+    }, 8000);
     return () => { if (hedgehogTimerRef.current) clearInterval(hedgehogTimerRef.current); hedgehogTimerRef.current = null; };
   }, [isPlaying, hedgehog, spawnHedgehog]);
 
@@ -191,40 +285,88 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
         // Trail
         setTrail((t: Position[]) => [head, ...t].slice(0, TRAIL_LENGTH));
 
-        // Food detection (improved): accept within 1 cell
-        if (food) {
-          const dx = Math.abs(newHead.x - food.x);
-          const dy = Math.abs(newHead.y - food.y);
-          if (dx <= 1 && dy <= 1) {
-            let pts = 0;
-            switch (food.type) {
-              case 'apple': pts = 1; break;
-              case 'money': pts = 2; break;
-              case 'rising': pts = 10; break;
-              case 'dropping': pts = -15; break;
-              case 'bonus': pts = 20; break;
+        // Food detection: use circle-based hit test between head center and food center
+        let ateAny = false;
+        setFoods((prevFoods) => {
+          const headCx = newHead.x * CELL_SIZE + CELL_SIZE / 2;
+          const headCy = newHead.y * CELL_SIZE + CELL_SIZE / 2;
+          // head radius in pixels (approximate based on visual head scale and inset)
+          const headRadius = Math.max(2, (CELL_SIZE * HEAD_SCALE) / 2 - SNAKE_DRAW_INSET);
+
+          for (const f of prevFoods) {
+            const foodCx = f.x * CELL_SIZE + CELL_SIZE / 2;
+            const foodCy = f.y * CELL_SIZE + CELL_SIZE / 2;
+            // food base radius (conservative, ignore spawn pulse here)
+            const foodRadius = Math.max(FOOD_RADIUS_MIN, CELL_SIZE * FOOD_RADIUS_FACTOR);
+            const dx = headCx - foodCx; const dy = headCy - foodCy;
+            const dist2 = dx * dx + dy * dy;
+            const hitRadius = headRadius + foodRadius;
+            if (dist2 <= hitRadius * hitRadius) {
+              let pts = 0;
+              switch (f.type) {
+                case 'apple': pts = 1; break;
+                case 'money': pts = 2; break;
+                case 'rising': pts = 10; break;
+                case 'dropping': pts = -15; break;
+                case 'bonus': pts = 20; break;
+              }
+              // Growth logic
+              let growth = 0;
+              if (f.type === 'apple' || f.type === 'money') growth = 1;
+              if (f.type === 'rising') growth = 2;
+              if (f.type === 'dropping') growth = 0;
+              growRef.current = (growRef.current || 0) + growth;
+              setScore((s: number) => Math.max(0, s + pts));
+              playSound(f.type === 'bonus' ? 900 : 700, 0.1);
+              setIntervalMs((i: number) => clamp(i - 8, MIN_INTERVAL, DEFAULT_INTERVAL));
+
+              const now = Date.now();
+              const marked = prevFoods.map(p => p.id === f.id ? { ...p, consumedAt: now } : p);
+              setTimeout(() => { setFoods((later) => later.filter(p => p.id !== f.id)); }, 260);
+              setTimeout(() => spawnFood(), 150);
+              foodSpawnCounterRef.current = (foodSpawnCounterRef.current || 0) + 1;
+              totalEatenRef.current = (totalEatenRef.current || 0) + 1;
+              const newLevel = Math.floor(totalEatenRef.current / 5) + 1;
+              if (newLevel > level) {
+                setLevel(newLevel);
+                setIntervalMs((i: number) => clamp(i - 8, MIN_INTERVAL, DEFAULT_INTERVAL));
+              }
+              if ((foodSpawnCounterRef.current || 0) >= (nextHedgehogAtRef.current || 5)) {
+                spawnHedgehog();
+                foodSpawnCounterRef.current = 0;
+                nextHedgehogAtRef.current = Math.floor(Math.random() * 2) + 5;
+              }
+              ateAny = true;
+              return marked;
             }
-            setScore((s: number) => Math.max(0, s + pts));
-            setFood(generateFood(newSnake));
-            playSound(food.type === 'bonus' ? 900 : 700, 0.1);
-            setIntervalMs((i: number) => clamp(i - 8, MIN_INTERVAL, DEFAULT_INTERVAL));
-            // grow (do not pop)
+          }
+          return prevFoods;
+        });
+
+        // Apply growth: if growRef > 0, do not pop tail (grow by retaining tail)
+        if (!ateAny) {
+          if (growRef.current && growRef.current > 0) {
+            // consume one growth unit, i.e., keep tail for this tick
+            growRef.current = Math.max(0, growRef.current - 1);
           } else {
             newSnake.pop();
           }
-        } else {
-          newSnake.pop();
         }
 
-        // Hedgehog movement (chase)
+        // Hedgehog movement (chase) - use a slower movement cadence
         if (hedgehog && hedgehog.active) {
-          const h = hedgehog.pos;
-          const dx = Math.sign(newSnake[0].x - h.x);
-          const dy = Math.sign(newSnake[0].y - h.y);
-          const newHp = { x: (h.x + dx + grid.width) % grid.width, y: (h.y + dy + grid.height) % grid.height };
-          setHedgehog({ pos: newHp, active: true });
-          if (newHp.x === newSnake[0].x && newHp.y === newSnake[0].y) {
-            setGameOver(true); setIsPlaying(false); playSound(120, 0.5);
+          // perform movement only on a slower interval relative to snake tick
+          const now = Date.now();
+          const lastMove = (hedgehog as any).lastMoveAt || 0;
+          if (now - lastMove > HEDGEHOG_MOVE_INTERVAL) {
+            const h = hedgehog.pos;
+            const dx = Math.sign(newSnake[0].x - h.x);
+            const dy = Math.sign(newSnake[0].y - h.y);
+            const newHp = { x: (h.x + dx + grid.width) % grid.width, y: (h.y + dy + grid.height) % grid.height };
+            setHedgehog({ pos: newHp, active: true, lastMoveAt: now } as any);
+            if (newHp.x === newSnake[0].x && newHp.y === newSnake[0].y) {
+              setGameOver(true); setIsPlaying(false); playSound(120, 0.5);
+            }
           }
         }
 
@@ -233,7 +375,7 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
     }, intervalMs);
 
     return () => { if (tickRef.current) clearInterval(tickRef.current); tickRef.current = null; };
-  }, [isPlaying, isPaused, gameOver, grid.width, grid.height, obstacles, food, hedgehog, generateFood, playSound, intervalMs]);
+    }, [isPlaying, isPaused, gameOver, grid.width, grid.height, obstacles, foods, hedgehog, generateFood, playSound, intervalMs]);
 
   // --- Keyboard handling: direction queue + hold-to-accelerate ---
   useEffect(() => {
@@ -309,9 +451,11 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
     setDirection('RIGHT');
     nextDirection.current = 'RIGHT';
     // Try to generate food; fallback to center if none found to ensure food always appears
-    const f = generateFood([start]);
-  if (f) { console.debug('[DOMSnake] spawn food on start', f); setFood(f); }
-  else { const fallback: Food = { x: Math.floor(grid.width / 2), y: Math.floor(grid.height / 2), type: 'apple', label: '🍎' }; console.debug('[DOMSnake] spawn fallback food on start', fallback); setFood(fallback); }
+    // Clear and spawn a couple of initial foods (ensures at least one neutral)
+    setFoods([]);
+    // spawn neutral first (apple) then a secondary
+    spawnFood('apple');
+    setTimeout(() => spawnFood(), 60);
     setScore(0);
     setIntervalMs(DEFAULT_INTERVAL);
     setIsPlaying(true);
@@ -351,24 +495,71 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
       const s = trail[i]; const alpha = (1 - i / TRAIL_LENGTH) * 0.3; ctx.fillStyle = `rgba(167,139,250,${alpha})`; ctx.fillRect(s.x * CELL_SIZE + 2, s.y * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4);
     }
 
-    // snake
+    // snake (draw larger, brighter body with subtle outline)
     for (let i = 0; i < snake.length; i++) {
-      const s = snake[i]; ctx.save(); if (i === 0) { ctx.shadowColor = '#a78bfa'; ctx.shadowBlur = 18; const g = ctx.createLinearGradient(s.x * CELL_SIZE, s.y * CELL_SIZE, s.x * CELL_SIZE + CELL_SIZE, s.y * CELL_SIZE + CELL_SIZE); g.addColorStop(0, '#e0d5ff'); g.addColorStop(1, '#a78bfa'); ctx.fillStyle = g; } else { const op = 1 - (i / snake.length) * 0.4; ctx.fillStyle = `rgba(196,181,253,${op})`; } ctx.fillRect(s.x * CELL_SIZE + 1, s.y * CELL_SIZE + 1, CELL_SIZE - 2, CELL_SIZE - 2); ctx.restore();
+      const s = snake[i]; ctx.save();
+      const inset = SNAKE_DRAW_INSET;
+      const x = s.x * CELL_SIZE + inset;
+      const y = s.y * CELL_SIZE + inset;
+      const w = CELL_SIZE - inset * 2;
+      const h = CELL_SIZE - inset * 2;
+      if (i === 0) {
+        ctx.shadowColor = '#9f7aea'; ctx.shadowBlur = 20;
+        const g = ctx.createLinearGradient(x, y, x + w, y + h);
+        g.addColorStop(0, SNAKE_BRIGHT_GRADIENT_START); g.addColorStop(1, SNAKE_BRIGHT_GRADIENT_END);
+        ctx.fillStyle = g;
+        // outline for head
+        ctx.lineWidth = 1.2; ctx.strokeStyle = SNAKE_OUTLINE_COLOR;
+      } else {
+        const op = 1 - (i / snake.length) * 0.45; ctx.fillStyle = `rgba(196,181,253,${op})`;
+        ctx.lineWidth = 0.6; ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      }
+      // slightly rounded segment for smoother look
+      const radius = 3;
+      ctx.beginPath(); ctx.moveTo(x + radius, y);
+      ctx.arcTo(x + w, y, x + w, y + h, radius);
+      ctx.arcTo(x + w, y + h, x, y + h, radius);
+      ctx.arcTo(x, y + h, x, y, radius);
+      ctx.arcTo(x, y, x + w, y, radius);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
     }
 
-    // food (draw high-contrast background circle then label)
-    if (food) {
-      const cx = food.x * CELL_SIZE + CELL_SIZE / 2;
-      const cy = food.y * CELL_SIZE + CELL_SIZE / 2;
+    // foods (draw each with spawn animation and optional movement interpolation)
+    for (let fi = 0; fi < foods.length; fi++) {
+      const foodItem = foods[fi];
+      // compute animation scale (spawn bounce)
+      const age = Math.max(0, animTime - foodItem.spawnAt);
+      const spawnScale = Math.min(1, age / 220);
+
+      // compute interpolated position if moving
+      let fx = foodItem.x;
+      let fy = foodItem.y;
+      if (foodItem.target && foodItem.moveStart && foodItem.moveDuration) {
+        const t = clamp((animTime - foodItem.moveStart) / foodItem.moveDuration, 0, 1);
+        fx = Math.round(foodItem.x * (1 - t) + foodItem.target.x * t);
+        fy = Math.round(foodItem.y * (1 - t) + foodItem.target.y * t);
+      }
+
+      const cx = fx * CELL_SIZE + CELL_SIZE / 2;
+      const cy = fy * CELL_SIZE + CELL_SIZE / 2;
       ctx.save();
-      // background circle
-      ctx.beginPath(); ctx.arc(cx, cy, Math.max(6, CELL_SIZE * 0.45), 0, Math.PI * 2);
-      if (food.type === 'dropping') ctx.fillStyle = '#7f1d1d';
-      else if (food.type === 'rising') ctx.fillStyle = '#064e3b';
+      // pulse for high-value
+      const pulse = ((Math.sin(animTime / 250 + fi) + 1) / 2) * 0.08 + 0.96;
+  const baseRadius = Math.max(FOOD_RADIUS_MIN, CELL_SIZE * FOOD_RADIUS_FACTOR);
+  const radius = baseRadius * spawnScale * pulse;
+  ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      if (foodItem.type === 'dropping') ctx.fillStyle = '#7f1d1d';
+      else if (foodItem.type === 'rising') ctx.fillStyle = '#064e3b';
       else ctx.fillStyle = '#111827';
+      ctx.globalAlpha = 0.98;
       ctx.fill();
       // label
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; if (food.type === 'rising' || food.type === 'dropping') { ctx.font = 'bold 11px monospace'; ctx.fillStyle = '#ffffff'; ctx.fillText(food.label, cx, cy); } else { ctx.font = 'bold 18px serif'; ctx.fillStyle = '#ffffff'; ctx.fillText(food.label, cx, cy); }
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (foodItem.type === 'rising' || foodItem.type === 'dropping') { ctx.font = `${Math.round(10 * (0.9 + spawnScale))}px monospace`; ctx.fillStyle = '#ffffff'; ctx.fillText(foodItem.label, cx, cy); }
+      else { ctx.font = `${Math.round(12 * (0.9 + spawnScale))}px serif`; ctx.fillStyle = '#ffffff'; ctx.fillText(foodItem.label, cx, cy); }
       ctx.restore();
     }
 
@@ -376,27 +567,26 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
     if (hedgehog && hedgehog.active) { const h = hedgehog.pos; ctx.save(); ctx.fillStyle = '#8b5cf6'; ctx.fillRect(h.x * CELL_SIZE + 2, h.y * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4); ctx.restore(); }
 
     ctx.restore();
-  }, [snake, trail, food, isPlaying, hedgehog]);
+  }, [snake, trail, foods, isPlaying, hedgehog, animTime]);
 
-  // Ensure food exists periodically if none present
+  // Ensure at least one neutral food exists and periodically try to spawn new items
   useEffect(() => {
     if (!isPlaying) return;
-    if (!food) {
-      const f = generateFood(snake);
-      if (f) setFood(f);
-      else {
-        // fallback: place food at center of play area
-        setFood({ x: Math.floor(grid.width / 2), y: Math.floor(grid.height / 2), type: 'apple', label: '🍎' });
-      }
-    }
+    // ensure at least one neutral exists
+    const neutral = foods.find(f => f.type === 'apple' || f.type === 'money');
+    if (!neutral) spawnFood('apple');
     const id = window.setInterval(() => {
-      if (!food) {
-        const f = generateFood(snake);
-        if (f) setFood(f);
+      // occasionally attempt to spawn (keeps play lively)
+  if ((foodsRef.current || []).length < 5) {
+        const r = Math.random();
+        if (r < 0.7) spawnFood();
+        else if (r < 0.85) spawnFood('money');
+        else if (r < 0.95) spawnFood('rising');
+        else spawnFood('dropping');
       }
-    }, 1500);
+    }, 1400 + Math.floor(Math.random() * 800));
     return () => clearInterval(id);
-  }, [isPlaying, food, generateFood, grid.width, grid.height, snake]);
+  }, [isPlaying, foods, spawnFood]);
 
   // Disable hover transitions on obstacle elements (non-destructive CSS class)
   useEffect(() => {
@@ -420,6 +610,7 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
         <div className="flex items-center gap-3 px-6 py-3 rounded-xl backdrop-blur-xl bg-black/60 border border-purple-500/30 shadow-2xl shadow-purple-500/20">
           <Badge className="bg-gradient-to-r from-purple-600 to-purple-500 px-3 py-1 shadow-lg shadow-purple-500/50">Score: {score}</Badge>
           <Badge variant="outline" className="border-purple-400/50 text-purple-300 px-3 py-1 backdrop-blur-sm bg-purple-500/10"><Trophy className="w-3 h-3 mr-1" />Best: {highScore}</Badge>
+          <Badge variant="secondary" className="text-purple-200 px-3 py-1">Lvl: {level}</Badge>
           <div className="flex items-center gap-2 ml-2">
             <Button variant="ghost" size="sm" onClick={() => setSoundEnabled((s:boolean) => !s)} className="text-purple-300 hover:text-purple-200 hover:bg-white/10 h-8 w-8 p-0">{soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}</Button>
             <Button variant="ghost" size="sm" onClick={onClose} className="text-purple-300 hover:text-purple-200 hover:bg-white/10 h-8 w-8 p-0"><X className="w-4 h-4" /></Button>
