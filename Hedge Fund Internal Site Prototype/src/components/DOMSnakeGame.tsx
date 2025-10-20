@@ -661,28 +661,42 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
       }
     }
 
+    // Build a clipping region that cuts holes where DOM boxes are, so we can
+    // draw the snake and trail once and have page elements appear above them.
+    // We'll use the even-odd rule: start with the play area rect, then add
+    // rects for each box as subpaths which will be excluded by the clip.
+    const applyClipForBoxes = (ctx2: CanvasRenderingContext2D, boxes: any[]) => {
+      if (!boxes || boxes.length === 0) return false;
+      ctx2.save();
+      ctx2.beginPath();
+      // outer rect: play area
+      ctx2.rect(0, 0, widthPx, playH);
+      // add boxes as holes (use rects offset by scroll)
+      for (const b of boxes) {
+        if (!b || b.width === 0 || b.height === 0) continue;
+        const left = b.left - (window.scrollX || 0);
+        const top = b.top - (window.scrollY || 0);
+        // Skip boxes that are completely outside the canvas
+        if (left + b.width < 0 || top + b.height < 0 || left > widthPx || top > playH) continue;
+        ctx2.rect(left, top, b.width, b.height);
+      }
+      // Use even-odd clipping so the inner rects become holes
+      try { ctx2.clip('evenodd'); } catch (e) { /* older browsers */ ctx2.clip(); }
+      return true;
+    };
+
     // trail
     for (let i = 0; i < trail.length; i++) {
       const s = trail[i]; const alpha = (1 - i / TRAIL_LENGTH) * 0.3; ctx.fillStyle = `rgba(167,139,250,${alpha})`; ctx.fillRect(s.x * CELL_SIZE + 2, s.y * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4);
     }
 
+    // Apply clipping for boxes and draw snake/trail under DOM elements
+    const clipped = applyClipForBoxes(ctx, boxesRef.current as any[]);
+
     // snake (draw larger, brighter body with subtle outline)
     for (let i = 0; i < snake.length; i++) {
-      const s = snake[i];
-      // compute segment pixel rect for overlap checks
+      const s = snake[i]; ctx.save();
       const inset = SNAKE_DRAW_INSET;
-      const segLeft = s.x * CELL_SIZE + inset;
-      const segTop = s.y * CELL_SIZE + inset;
-      const segRight = s.x * CELL_SIZE + (CELL_SIZE - inset);
-      const segBottom = s.y * CELL_SIZE + (CELL_SIZE - inset);
-
-      // If this segment intersects any runtime DOM box, skip drawing it so the
-      // DOM element visually appears above the snake (simple "under" effect).
-      if (!shouldDrawSegment({ left: segLeft + (window.scrollX || 0), top: segTop + (window.scrollY || 0), right: segRight + (window.scrollX || 0), bottom: segBottom + (window.scrollY || 0) }, boxesRef.current as any[])) {
-        continue;
-      }
-
-      ctx.save();
       const x = s.x * CELL_SIZE + inset;
       const y = s.y * CELL_SIZE + inset;
       const w = CELL_SIZE - inset * 2;
@@ -729,6 +743,9 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
       }
       ctx.restore();
     }
+
+    // restore after clip
+    if (clipped) ctx.restore();
 
     // foods (draw each with spawn animation and optional movement interpolation)
     for (let fi = 0; fi < foods.length; fi++) {
