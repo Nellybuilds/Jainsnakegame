@@ -91,6 +91,101 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
   // CSS class to reduce hover effects on obstacles
   const DISABLE_HOVER_CLASS = 'dom-snake-disable-hover';
 
+  // BoxesRef holds runtime pixel boxes for elements we want the snake to interact with.
+  // We'll populate this from a DOM scan (if available) or from the existing obstacles list.
+  const boxesRef = useRef<Array<{ left:number; top:number; right:number; bottom:number; width:number; height:number; element: HTMLElement; rect?: DOMRect }>>([]);
+
+  // -------------------- DOM interaction helpers --------------------
+  // These helpers refresh runtime positions and handle wiggle animations for text elements.
+  let wiggleInjected = false;
+  const injectWiggleCSS = () => {
+    if (wiggleInjected) return; wiggleInjected = true;
+    const s = document.createElement('style'); s.id = 'dom-snake-wiggle-style';
+    s.innerHTML = `@keyframes dom-snake-wiggle{0%{transform:translateY(0) rotate(0)}25%{transform:translateY(-3px) rotate(-0.8deg)}50%{transform:translateY(0) rotate(0.2deg)}75%{transform:translateY(-2px) rotate(0.7deg)}100%{transform:translateY(0) rotate(0)}}.dom-snake-wiggle{display:inline-block!important;transform-origin:center center;animation:dom-snake-wiggle 360ms ease-in-out;animation-iteration-count:infinite;pointer-events:none}`;
+    document.head.appendChild(s);
+  };
+
+  const refreshBoxesRuntime = (boxes: any[]) => {
+    const sx = window.scrollX || window.pageXOffset || 0;
+    const sy = window.scrollY || window.pageYOffset || 0;
+    for (const b of boxes) {
+      try {
+        const r = b.element.getBoundingClientRect();
+        b.rect = r;
+        b.pageLeft = r.left + sx;
+        b.pageTop = r.top + sy;
+        b.left = b.pageLeft;
+        b.top = b.pageTop;
+        b.right = b.left + r.width;
+        b.bottom = b.top + r.height;
+        b.width = r.width; b.height = r.height;
+      } catch (e) {
+        b.rect = undefined; b.pageLeft = 0; b.pageTop = 0; b.left = 0; b.top = 0; b.right = 0; b.bottom = 0; b.width = 0; b.height = 0;
+      }
+    }
+  };
+
+  const circleIntersectsRect = (cx:number, cy:number, r:number, rect:{ left:number; top:number; right:number; bottom:number }) => {
+    const closestX = Math.max(rect.left, Math.min(cx, rect.right));
+    const closestY = Math.max(rect.top, Math.min(cy, rect.bottom));
+    const dx = cx - closestX; const dy = cy - closestY; return dx*dx + dy*dy <= r*r;
+  };
+
+  const elementHasVisibleText = (el: HTMLElement) => {
+    const txt = el.innerText || el.textContent || ''; return txt.trim().length > 0;
+  };
+
+  const _wiggling = new WeakSet<HTMLElement>();
+  const addWiggleToElement = (el: HTMLElement) => {
+    if (!el || _wiggling.has(el)) return; _wiggling.add(el); injectWiggleCSS();
+    // wrap direct text nodes in spans so we can animate without breaking layout too much
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null as any);
+    const texts: Text[] = [];
+    while (walker.nextNode()) {
+      const n = walker.currentNode as Text; if (!n.nodeValue || !n.nodeValue.trim()) continue; texts.push(n);
+    }
+    for (const t of texts) {
+      const p = t.parentElement; if (!p) continue; if (p.classList && p.classList.contains('dom-snake-wiggle')) continue;
+      const span = document.createElement('span'); span.className = 'dom-snake-wiggle'; span.style.display = 'inline-block'; span.textContent = t.textContent; t.replaceWith(span);
+    }
+    if (texts.length === 0 && elementHasVisibleText(el)) try { el.classList.add('dom-snake-wiggle'); } catch {}
+  };
+
+  const removeWiggleFromElement = (el: HTMLElement) => {
+    if (!el || !_wiggling.has(el)) return; _wiggling.delete(el);
+    try {
+      el.querySelectorAll('.dom-snake-wiggle').forEach(n => {
+        if (n instanceof HTMLElement && n.style && n.style.display === 'inline-block') {
+          const txt = document.createTextNode(n.textContent || ''); n.replaceWith(txt); return;
+        }
+        n.classList.remove('dom-snake-wiggle');
+      }); el.classList.remove('dom-snake-wiggle');
+    } catch (e) {}
+  };
+
+  const isBlockLike = (el: HTMLElement) => {
+    try { const st = window.getComputedStyle(el); if (st.display === 'inline') return false; const r = el.getBoundingClientRect(); return r.width > 20 && r.height > 20; } catch (e) { return false; }
+  };
+
+  const detectOverlapsWithBoxes = (boxes: any[], headPx: { cx:number; cy:number }, cellSize:number, headRadiusPx?: number) => {
+    const cx = headPx.cx; const cy = headPx.cy; const r = headRadiusPx ?? Math.max(2, (cellSize * HEAD_SCALE) / 2 - SNAKE_DRAW_INSET);
+    const overlapped: any[] = [];
+    for (const b of boxes) {
+      if (!b || (b.width === 0 && b.height === 0)) continue;
+      const rect = { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
+      if (circleIntersectsRect(cx, cy, r, rect)) overlapped.push(b);
+    }
+    return overlapped;
+  };
+
+  const shouldDrawSegment = (segRect:{ left:number; top:number; right:number; bottom:number }, boxes:any[]) => {
+    for (const b of boxes) {
+      if (!b) continue; if (!(segRect.right <= b.left || segRect.left >= b.right || segRect.bottom <= b.top || segRect.top >= b.bottom)) return false;
+    }
+    return true;
+  };
+  // -------------------- end DOM interaction helpers --------------------
+
   // --- Grid setup and DOM scanning ---
   const updateGrid = useCallback(() => {
     const width = Math.max(10, Math.floor(window.innerWidth / CELL_SIZE));
@@ -535,6 +630,37 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
     // No visible borders or overlays: canvas blends into the page
     if (isPlaying) { ctx.fillStyle = 'rgba(0,0,0,0.01)'; ctx.fillRect(0, 0, widthPx, playH); }
 
+    // --- DOM interaction: refresh runtime boxes and detect overlaps ---
+    // If boxesRef empty, initialize from obstacles (map obstacles to pixel boxes)
+    if (!boxesRef.current || boxesRef.current.length === 0) {
+      boxesRef.current = obstacles.map(o => ({ left: o.x * CELL_SIZE, top: o.y * CELL_SIZE, right: (o.x + o.width) * CELL_SIZE, bottom: (o.y + o.height) * CELL_SIZE, width: o.width * CELL_SIZE, height: o.height * CELL_SIZE, element: o.element }));
+    }
+    // refresh runtime positions so boxes reflect scroll/flow
+    refreshBoxesRuntime(boxesRef.current as any);
+
+    // compute head center in page pixels for overlap detection
+    const head = snake.length ? snake[0] : null;
+    let overlapped: any[] = [];
+    if (head) {
+      const cx = head.x * CELL_SIZE + CELL_SIZE / 2 + (window.scrollX || 0);
+      const cy = head.y * CELL_SIZE + CELL_SIZE / 2 + (window.scrollY || 0);
+      overlapped = detectOverlapsWithBoxes(boxesRef.current as any[], { cx, cy }, CELL_SIZE);
+    }
+
+    // apply wiggle for overlapped boxes that contain text, and mark block-like boxes
+    for (const b of overlapped) {
+      try {
+        if (elementHasVisibleText(b.element)) addWiggleToElement(b.element);
+        else if (isBlockLike(b.element)) b.element.classList.add('dom-snake-overlapped');
+      } catch (e) {}
+    }
+    // cleanup: remove wiggle/class from boxes no longer overlapped
+    for (const b of boxesRef.current) {
+      if (!overlapped.includes(b)) {
+        try { removeWiggleFromElement(b.element); b.element.classList.remove && b.element.classList.remove('dom-snake-overlapped'); } catch (e) {}
+      }
+    }
+
     // trail
     for (let i = 0; i < trail.length; i++) {
       const s = trail[i]; const alpha = (1 - i / TRAIL_LENGTH) * 0.3; ctx.fillStyle = `rgba(167,139,250,${alpha})`; ctx.fillRect(s.x * CELL_SIZE + 2, s.y * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4);
@@ -542,8 +668,21 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
 
     // snake (draw larger, brighter body with subtle outline)
     for (let i = 0; i < snake.length; i++) {
-      const s = snake[i]; ctx.save();
+      const s = snake[i];
+      // compute segment pixel rect for overlap checks
       const inset = SNAKE_DRAW_INSET;
+      const segLeft = s.x * CELL_SIZE + inset;
+      const segTop = s.y * CELL_SIZE + inset;
+      const segRight = s.x * CELL_SIZE + (CELL_SIZE - inset);
+      const segBottom = s.y * CELL_SIZE + (CELL_SIZE - inset);
+
+      // If this segment intersects any runtime DOM box, skip drawing it so the
+      // DOM element visually appears above the snake (simple "under" effect).
+      if (!shouldDrawSegment({ left: segLeft + (window.scrollX || 0), top: segTop + (window.scrollY || 0), right: segRight + (window.scrollX || 0), bottom: segBottom + (window.scrollY || 0) }, boxesRef.current as any[])) {
+        continue;
+      }
+
+      ctx.save();
       const x = s.x * CELL_SIZE + inset;
       const y = s.y * CELL_SIZE + inset;
       const w = CELL_SIZE - inset * 2;
