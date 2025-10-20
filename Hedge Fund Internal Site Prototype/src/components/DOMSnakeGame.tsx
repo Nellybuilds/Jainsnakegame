@@ -19,7 +19,8 @@ const DEFAULT_INTERVAL = 120; // ms
 const ACCEL_STEP = 10; // ms faster per accel tick
 const MIN_INTERVAL = 30; // fastest
 const TRAIL_LENGTH = 15;
-const PLAY_AREA_RATIO = 0.38; // top portion only
+// Use the full viewport height for the play area (unconditional full-page mode)
+const PLAY_AREA_RATIO = 1.0;
 
 const STOCK_TICKERS = ['AAPL','SBUX','TSLA','MSFT','AMZN','GOOGL','META','NVDA','NFLX','AMD'];
 const MONEY_BAGS = ['💰','💵','💸','💎','🏆'];
@@ -29,9 +30,10 @@ const clamp = (v:number,a:number,b:number) => Math.max(a, Math.min(b, v));
 // Visual tuning constants (easy to tweak)
 // Increase snake visibility: reduce inset so painted segment fills more of the cell.
 const SNAKE_DRAW_INSET = 0.25; // smaller inset -> larger visible snake in cell
-const SNAKE_OUTLINE_COLOR = '#ffffff'; // subtle outline for contrast
-const SNAKE_BRIGHT_GRADIENT_START = '#f8fbff';
-const SNAKE_BRIGHT_GRADIENT_END = '#c7f0ff';
+// Make the snake visually integrate with the page: green (invasive) palette
+const SNAKE_OUTLINE_COLOR = '#08320a'; // dark green outline
+const SNAKE_BRIGHT_GRADIENT_START = '#eaffea';
+const SNAKE_BRIGHT_GRADIENT_END = '#2ecc71';
 // HEAD_SCALE controls the radius used for hit detection (visual-to-hit mapping)
 const HEAD_SCALE = 1.0; // use full-cell visual size for head collision
 // Make foods (stocks) smaller than the snake head by lowering the factor
@@ -82,6 +84,9 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
   // hedgehog chase timeout (ms)
   const HEDGEHOG_CHASE_TIMEOUT = 4000; // shorter chase
   const HEDGEHOG_MOVE_INTERVAL = 400; // slower movement
+
+  // Stock lifespan: auto-remove unconsumed stock items after this many ms
+  const STOCK_LIFESPAN_MS = 15000; // 15 seconds
 
   // CSS class to reduce hover effects on obstacles
   const DISABLE_HOVER_CLASS = 'dom-snake-disable-hover';
@@ -230,7 +235,12 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
           }
           return f;
         });
-        return changed ? out : prev;
+        // Remove any unconsumed stock that lived longer than STOCK_LIFESPAN_MS
+        const filtered = out.filter((f) => {
+          if (f.consumedAt) return true; // keep consumed items until animation completes
+          return Date.now() - f.spawnAt <= STOCK_LIFESPAN_MS;
+        });
+        return changed || filtered.length !== prev.length ? filtered : prev;
       });
 
       rafRef.current = requestAnimationFrame(loop);
@@ -539,26 +549,45 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
       const w = CELL_SIZE - inset * 2;
       const h = CELL_SIZE - inset * 2;
       if (i === 0) {
-        ctx.shadowColor = '#9f7aea'; ctx.shadowBlur = 20;
+        // head: make it bright green and give it a subtle bite/mouth when consuming
+        ctx.shadowColor = 'rgba(34,139,34,0.25)'; ctx.shadowBlur = 14;
         const g = ctx.createLinearGradient(x, y, x + w, y + h);
         g.addColorStop(0, SNAKE_BRIGHT_GRADIENT_START); g.addColorStop(1, SNAKE_BRIGHT_GRADIENT_END);
         ctx.fillStyle = g;
-        // outline for head
         ctx.lineWidth = 1.2; ctx.strokeStyle = SNAKE_OUTLINE_COLOR;
+        // head shape with mouth: draw rounded rect then a triangular mouth when recently ate
+        const radius = 3;
+        ctx.beginPath(); ctx.moveTo(x + radius, y);
+        ctx.arcTo(x + w, y, x + w, y + h, radius);
+        ctx.arcTo(x + w, y + h, x, y + h, radius);
+        ctx.arcTo(x, y + h, x, y, radius);
+        ctx.arcTo(x, y, x + w, y, radius);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        // mouth animation: if the first food in foods was just consumed (recent pulse) show mouth
+        const recentEat = foods.some(f => f.consumedAt && (animTime - f.consumedAt) < 260);
+        if (recentEat) {
+          ctx.save(); ctx.fillStyle = '#08320a';
+          // simple triangular mouth pointing in movement direction
+          const cx = x + w/2; const cy = y + h/2;
+          ctx.beginPath();
+          if (direction === 'LEFT') { ctx.moveTo(x+4, cy); ctx.lineTo(x+8, cy-6); ctx.lineTo(x+8, cy+6); }
+          else if (direction === 'RIGHT') { ctx.moveTo(x+w-4, cy); ctx.lineTo(x+w-8, cy-6); ctx.lineTo(x+w-8, cy+6); }
+          else if (direction === 'UP') { ctx.moveTo(cx, y+4); ctx.lineTo(cx-6, y+8); ctx.lineTo(cx+6, y+8); }
+          else { ctx.moveTo(cx, y+h-4); ctx.lineTo(cx-6, y+h-8); ctx.lineTo(cx+6, y+h-8); }
+          ctx.closePath(); ctx.fill(); ctx.restore();
+        }
       } else {
-        const op = 1 - (i / snake.length) * 0.45; ctx.fillStyle = `rgba(196,181,253,${op})`;
-        ctx.lineWidth = 0.6; ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+        const op = 1 - (i / snake.length) * 0.45; ctx.fillStyle = `rgba(46,139,87,${op})`;
+        ctx.lineWidth = 0.6; ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+        const radius = 2.5;
+        ctx.beginPath(); ctx.moveTo(x + radius, y);
+        ctx.arcTo(x + w, y, x + w, y + h, radius);
+        ctx.arcTo(x + w, y + h, x, y + h, radius);
+        ctx.arcTo(x, y + h, x, y, radius);
+        ctx.arcTo(x, y, x + w, y, radius);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
       }
-      // slightly rounded segment for smoother look
-      const radius = 3;
-      ctx.beginPath(); ctx.moveTo(x + radius, y);
-      ctx.arcTo(x + w, y, x + w, y + h, radius);
-      ctx.arcTo(x + w, y + h, x, y + h, radius);
-      ctx.arcTo(x, y + h, x, y, radius);
-      ctx.arcTo(x, y, x + w, y, radius);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
       ctx.restore();
     }
 
@@ -652,9 +681,10 @@ export function DOMSnakeGame({ onClose }: DOMSnakeGameProps) {
     const styleId = 'dom-snake-disable-hover-style';
     if (!document.getElementById(styleId)) {
       const style = document.createElement('style'); style.id = styleId;
+      // Make obstacle adjustments non-destructive: remove hover transforms but keep interactions.
       style.innerHTML = `.${DISABLE_HOVER_CLASS}:hover{ transition:none !important; transform:none !important; box-shadow:none !important; filter:none !important; }
-      /* reduce visual clutter in the play area and disable interaction */
-      .${DISABLE_HOVER_CLASS} { opacity: 0.6 !important; pointer-events: none !important; user-select: none !important; }
+      /* reduce visual clutter in the play area while preserving interactions */
+      .${DISABLE_HOVER_CLASS} { opacity: 0.98 !important; pointer-events: auto !important; user-select: auto !important; }
       `;
       document.head.appendChild(style);
     }
